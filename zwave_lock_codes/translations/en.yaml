@@ -1,7 +1,13 @@
 configuration:
+  locks:
+    name: Locks
+    description: >-
+      The Z-Wave JS lock entities to manage, e.g. lock.front_door. Codes share
+      one table; each code can be ticked for any of these locks.
   lock_entity:
-    name: Lock entity
-    description: The Z-Wave JS lock entity whose codes this add-on manages, e.g. lock.front_door.
+    name: Lock entity (old setting)
+    description: >-
+      Replaced by Locks. If set, this lock is managed too and listed first.
   log_level:
     name: Log level
     description: How much to log. PINs are never logged.

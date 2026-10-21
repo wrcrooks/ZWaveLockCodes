@@ -90,8 +90,8 @@ def test_end_to_end(tmp_path, monkeypatch):
         monkeypatch.setenv("HA_URL", ha_url)
         monkeypatch.setenv("HA_TOKEN", TOKEN)
 
-        store = Store(str(tmp_path / "codes.json"))
-        syncer = Syncer(store, LOCK)
+        store = Store(str(tmp_path / "codes.json"), [LOCK])
+        syncer = Syncer(store)
         ui_runner, ui_url = await serve(build_app(store, syncer))
         try:
             async with aiohttp.ClientSession() as http:
@@ -100,32 +100,37 @@ def test_end_to_end(tmp_path, monkeypatch):
 
                 async with http.post(ui_url + "/api/import") as res:
                     state = await res.json()
-                assert [r["slot"] for r in state["rows"]] == [7] and state["max_slots"] == 30
+                assert [r["slot"] for r in state["rows"]] == [7]
+                assert state["locks"] == [{"entity": LOCK, "label": "Front door", "max_slots": 30, "pin_length": None}]
+                assert state["imported"]["added"] == 1
 
                 rows = [
-                    {"slot": 7, "name": "Alice", "pin": "7777", "enabled": True},
-                    {"slot": 2, "name": "Bob", "pin": "2222", "enabled": True},
+                    {"slot": 7, "name": "Alice", "pin": "7777", "enabled": True, "locks": [LOCK]},
+                    {"slot": 2, "name": "Bob", "pin": "2222", "enabled": True, "locks": [LOCK]},
                 ]
                 async with http.put(ui_url + "/api/codes", json={"rows": rows}) as res:
                     assert res.status == 200
                 await syncer.wait()
                 assert codes[2] == "2222"
 
-                bad = [{"slot": 3, "name": "x", "pin": "12", "enabled": True}]
+                bad = [{"slot": 3, "name": "x", "pin": "12", "enabled": True, "locks": [LOCK]}]
                 async with http.put(ui_url + "/api/codes", json={"rows": bad}) as res:
                     assert res.status == 400 and "3" in (await res.json())["errors"]
 
                 async with http.get(ui_url + "/api/state") as res:
                     state = await res.json()
-                assert {r["slot"]: r["status"]["state"] for r in state["rows"]} == {2: "synced", 7: "synced"}
+                assert {r["slot"]: r["status"][LOCK]["state"] for r in state["rows"]} == {2: "synced", 7: "synced"}
                 assert not state["syncing"] and state["error"] is None
 
-                async with http.get(ui_url + "/api/config") as res:
+                async with http.get(ui_url + "/api/config", params={"lock": LOCK}) as res:
                     data = await res.json()
                 assert [p["label"] for p in data["params"]] == ["Vacation Mode", "User Code PIN Length"]
-                assert data["pin_length"] == 4
+                assert store.info(LOCK, "pin_length") == 4
 
-                body = {"property": 4, "property_key": None, "endpoint": 0, "value": 255}
+                async with http.get(ui_url + "/api/config", params={"lock": "lock.nope"}) as res:
+                    assert res.status == 400
+
+                body = {"lock": LOCK, "property": 4, "property_key": None, "endpoint": 0, "value": 255}
                 async with http.put(ui_url + "/api/config", json=body) as res:
                     data = await res.json()
                 assert config[4] == 255 and data["params"][0]["value"] == 255
@@ -139,7 +144,7 @@ def test_end_to_end(tmp_path, monkeypatch):
             syncer.request()
             await syncer.wait()
             assert "authentication failed" in syncer.last_error
-            assert store.status[2]["state"] == "error"
+            assert store.status[LOCK][2]["state"] == "error"
         finally:
             await ui_runner.cleanup()
             await ha_runner.cleanup()

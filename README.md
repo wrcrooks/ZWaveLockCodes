@@ -1,7 +1,7 @@
 # Z-Wave Lock Codes
 
-A Home Assistant add-on with a table for your Z-Wave lock's user codes. Only
-the slots you change get written to the lock. Built for a Schlage BE469ZP on
+A Home Assistant add-on with one table for your Z-Wave locks' user codes. Only
+the slots you change get written to the locks. Built for the Schlage BE469ZP on
 Z-Wave JS; it needs nothing else installed.
 
 ## Install
@@ -30,7 +30,7 @@ python3 -m venv .venv && .venv/bin/pip install aiohttp pytest
 # Run the UI locally against a real Home Assistant
 mkdir -p /tmp/lc && cd zwave_lock_codes/app && DATA_DIR=/tmp/lc \
   HA_URL=http://homeassistant.local:8123 HA_TOKEN=<long-lived token> \
-  LOCK_ENTITY=lock.front_door python3 -m zwave_lock_codes
+  LOCKS=lock.front_door,lock.back_door python3 -m zwave_lock_codes
 ```
 
 The Z-Wave slot-reading rules in `zwave_lock_codes/app/zwave_lock_codes/zwave.py`

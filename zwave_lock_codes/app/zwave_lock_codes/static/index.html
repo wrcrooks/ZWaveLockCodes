@@ -16,9 +16,10 @@
     }
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   body { margin: 0; background: var(--bg); color: var(--text);
          font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-  main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  main { max-width: 1180px; margin: 0 auto; padding: 16px; }
   header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-bottom: 12px; }
   h1 { font-size: 20px; margin: 0; font-weight: 600; }
   .lock { color: var(--muted); }
@@ -40,30 +41,35 @@
   tr.deleted td { opacity: .55; text-decoration: line-through; }
   tr.invalid input { border-color: var(--err); }
   .err { color: var(--err); font-size: 12px; }
+  .locks { display: flex; flex-direction: column; gap: 2px; white-space: nowrap; }
+  .locks label { display: inline-flex; gap: 6px; align-items: center; }
+  .statuses { display: flex; flex-direction: column; gap: 3px; }
   .chip { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; white-space: nowrap;
           border: 1px solid currentColor; }
   .synced { color: var(--ok); } .unverified { color: var(--ok); border-style: dashed; }
-  .pending, .writing { color: var(--warn); } .error { color: var(--err); }
+  .pending, .writing, .skipped { color: var(--warn); } .error { color: var(--err); }
   .msg { color: var(--muted); font-size: 12px; }
   .banner { margin: 0 0 12px; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--err); color: var(--err); }
+  .banner.note { border-color: var(--line); color: var(--text); background: var(--card); }
   .banner:empty { display: none; }
+  .banner ul { margin: 4px 0 0; padding-left: 20px; }
   .empty { padding: 24px; text-align: center; color: var(--muted); }
   label.toggle { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); }
   details.config { margin-bottom: 12px; }
   details.config > summary { padding: 10px 14px; cursor: pointer; font-weight: 600; list-style-position: inside; }
   details.config[open] > summary { border-bottom: 1px solid var(--line); }
   .config-body { padding: 4px 14px 12px; }
+  .picker { display: flex; gap: 8px; align-items: center; padding: 10px 0 4px; }
   .setting { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; padding: 8px 0;
              border-bottom: 1px solid var(--line); }
   .setting:last-child { border-bottom: 0; }
   .setting .what { flex: 1 1 260px; }
   .setting .desc { color: var(--muted); font-size: 12px; }
   .setting .how { display: flex; gap: 8px; align-items: center; }
-  .setting select, .setting input { font: inherit; padding: 4px 6px; border: 1px solid var(--line);
-                                    border-radius: 4px; background: var(--input); color: var(--text); }
+  select, .setting input { font: inherit; padding: 4px 6px; border: 1px solid var(--line);
+                           border-radius: 4px; background: var(--input); color: var(--text); }
   .setting input { width: 90px; }
   .setting .note { font-size: 12px; min-width: 60px; }
-  .ok { color: var(--ok); }
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); margin: 14px 0 2px; }
   .info { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 4px 16px; }
   .info div { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; }
@@ -77,34 +83,41 @@
     <span class="lock" id="lock"></span>
     <span class="spacer"></span>
     <label class="toggle"><input type="checkbox" id="reveal"> Show PINs</label>
-    <button id="import" title="Add codes already on the lock to empty rows">Import from lock</button>
+    <button id="import" title="Add codes already on the locks to the table">Import from locks</button>
     <button id="retry" title="Try failed or pending slots again">Retry</button>
     <button id="add">Add code</button>
     <button id="discard" disabled>Discard</button>
     <button id="save" class="primary" disabled>Save &amp; sync</button>
   </header>
-  <p class="banner" id="banner"></p>
+  <div class="banner" id="banner"></div>
+  <div class="banner note" id="notice"></div>
   <details class="card config" id="config">
     <summary>Lock configuration</summary>
-    <div class="config-body" id="config-body"><p class="msg">Loading…</p></div>
+    <div class="config-body">
+      <div class="picker" id="picker" hidden>
+        <label for="config-lock" class="msg">Lock</label>
+        <select id="config-lock"></select>
+      </div>
+      <div id="config-body"><p class="msg">Loading…</p></div>
+    </div>
   </details>
   <div class="card">
     <table>
-      <thead><tr><th>Slot</th><th>Name</th><th>PIN</th><th>Enabled</th><th>Notes</th><th>Status</th><th></th></tr></thead>
+      <thead><tr id="head"></tr></thead>
       <tbody id="rows"></tbody>
     </table>
   </div>
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
-let server = { rows: [] };   // last state from the add-on
-let draft = null;            // the user's unsaved edits, or null
+let server = { rows: [], locks: [] };  // last state from the add-on
+let draft = null;                      // the user's unsaved edits, or null
 let errors = {};
 let pollTimer = null;
 let nextId = 0;
 
 const LABELS = { synced: "Synced", unverified: "Synced (hidden)", pending: "Pending",
-                 writing: "Writing…", error: "Error" };
+                 writing: "Writing…", error: "Error", skipped: "Not on lock" };
 
 async function api(method, path, body) {
   const res = await fetch(path, { method, headers: { "Content-Type": "application/json" },
@@ -115,9 +128,11 @@ async function api(method, path, body) {
 }
 
 function rows() { return draft ?? server.rows; }
+function multi() { return server.locks.length > 1; }
+function labelOf(entity) { return server.locks.find((l) => l.entity === entity)?.label ?? entity; }
 
 function edit() {
-  if (!draft) draft = server.rows.filter((r) => !r.deleted).map((r) => ({ ...r }));
+  if (!draft) draft = server.rows.filter((r) => !r.deleted).map((r) => ({ ...r, locks: [...r.locks] }));
   $("save").disabled = $("discard").disabled = false;
   return draft;
 }
@@ -128,48 +143,91 @@ function el(tag, props = {}, ...kids) {
   return e;
 }
 
+function pinHint(r) {
+  if (r.pin === null) return "hidden on lock";
+  const lengths = new Set(server.locks.filter((l) => r.locks.includes(l.entity) && l.pin_length).map((l) => l.pin_length));
+  return lengths.size === 1 ? `${[...lengths][0]} digits` : "4–8 digits";
+}
+
+function statusCell(r) {
+  const entries = Object.entries(r.status || {});
+  if (!entries.length) return el("span", { className: "msg", textContent: draft ? "Unsaved" : "Not on any lock" });
+  return el("div", { className: "statuses" }, ...entries.map(([lock, st]) => {
+    const clearing = r.deleted || r.enabled === false || !r.locks.includes(lock);
+    const text = clearing && ["pending", "writing"].includes(st.state)
+      ? "Clearing" : LABELS[st.state] || st.state;
+    return el("div", {},
+      el("span", { className: `chip ${st.state}`, title: st.message || "",
+                   textContent: multi() ? `${labelOf(lock)}: ${text}` : text }),
+      st.message ? el("div", { className: "msg", textContent: st.message }) : "");
+  }));
+}
+
 function render() {
-  $("lock").textContent = server.lock || "";
-  $("banner").textContent = server.error ? `Last sync failed: ${server.error}` : "";
+  const names = server.locks.map((l) => l.label);
+  $("lock").textContent = names.length ? names.join(" · ") : "";
+  $("banner").textContent = !server.locks.length
+    ? "No locks are set up yet. Add your lock entities on the add-on's Configuration tab, then restart it."
+    : server.error ? `Last sync failed: ${server.error}` : "";
+  $("head").replaceChildren(...["Slot", "Name", "PIN", "Enabled", ...(multi() ? ["Locks"] : []), "Notes", "Status", ""]
+    .map((t) => el("th", { textContent: t })));
   const reveal = $("reveal").checked;
   const body = $("rows");
   body.replaceChildren();
   const list = rows();
   if (!list.length) {
-    body.append(el("tr", {}, el("td", { colSpan: 7, className: "empty",
-      textContent: "No codes yet. Add one, or import what's already on the lock." })));
+    body.append(el("tr", {}, el("td", { colSpan: multi() ? 8 : 7, className: "empty",
+      textContent: "No codes yet. Add one, or import what's already on your locks." })));
   }
   for (const r of list) {
     const tr = el("tr", { className: (r.deleted ? "deleted " : "") + (errors[r.slot] ? "invalid" : "") });
+    const target = () => edit().find((x) => x._id === r._id);
     const bind = (input, key, conv = (v) => v) => {
       input.addEventListener("input", () => {
-        const target = edit().find((x) => x._id === r._id);
-        target[key] = conv(input.type === "checkbox" ? input.checked : input.value);
+        target()[key] = conv(input.type === "checkbox" ? input.checked : input.value);
       });
       input.disabled = !!r.deleted;
       return input;
     };
-    const slot = bind(el("input", { type: "number", className: "slot", min: 1, max: server.max_slots || 250, value: r.slot }),
-                      "slot", Number);
+    const slot = bind(el("input", { type: "number", className: "slot", min: 1, value: r.slot }), "slot", Number);
     const name = bind(el("input", { type: "text", value: r.name || "", maxLength: 64, placeholder: "Name" }), "name");
     const pin = bind(el("input", { type: reveal ? "text" : "password", className: "pin", value: r.pin ?? "",
-                                   inputMode: "numeric", maxLength: 8, autocomplete: "off",
-                                   placeholder: r.pin === null ? "hidden on lock" : server.pin_length ? `${server.pin_length} digits` : "4–8 digits" }), "pin");
+                                   inputMode: "numeric", maxLength: 8, autocomplete: "off", placeholder: pinHint(r) }), "pin");
     const enabled = bind(el("input", { type: "checkbox", checked: r.enabled !== false }), "enabled");
     const notes = bind(el("input", { type: "text", value: r.notes || "", maxLength: 256 }), "notes");
-    const st = r.status;
-    const status = st ? el("div", {}, el("span", { className: `chip ${st.state}`, textContent: r.deleted && st.state !== "error" ? "Clearing" : LABELS[st.state] || st.state }),
-                           st.message ? el("div", { className: "msg", textContent: st.message }) : "")
-                      : el("span", { className: "msg", textContent: "Unsaved" });
-    const del = el("button", { textContent: "Delete", disabled: !!r.deleted, title: "Remove and clear this slot on the lock" });
+    const cells = [el("td", {}, slot), el("td", {}, name), el("td", {}, pin), el("td", {}, enabled)];
+    if (multi()) {
+      cells.push(el("td", {}, el("div", { className: "locks" }, ...server.locks.map((l) => {
+        const box = el("input", { type: "checkbox", checked: r.locks.includes(l.entity), disabled: !!r.deleted });
+        box.addEventListener("change", () => {
+          const t = target();
+          t.locks = server.locks.map((x) => x.entity)
+            .filter((e) => (e === l.entity ? box.checked : t.locks.includes(e)));
+        });
+        return el("label", {}, box, l.label);
+      }))));
+    }
+    const del = el("button", { textContent: "Delete", disabled: !!r.deleted, title: "Remove and clear this slot on every lock" });
     del.addEventListener("click", () => { draft = edit().filter((x) => x._id !== r._id); render(); });
-    tr.append(el("td", {}, slot), el("td", {}, name), el("td", {}, pin), el("td", {}, enabled),
-              el("td", {}, notes), el("td", {}, status, errors[r.slot] ? el("div", { className: "err", textContent: errors[r.slot] }) : ""),
-              el("td", {}, del));
+    cells.push(el("td", {}, notes),
+               el("td", {}, statusCell(r), errors[r.slot] ? el("div", { className: "err", textContent: errors[r.slot] }) : ""),
+               el("td", {}, del));
+    tr.append(...cells);
     body.append(tr);
   }
-  $("retry").disabled = server.syncing || !server.rows.some((r) => ["error", "pending"].includes(r.status?.state));
-  $("import").disabled = server.syncing;
+  const states = server.rows.flatMap((r) => Object.values(r.status || {}).map((s) => s.state));
+  $("retry").disabled = server.syncing || !states.some((s) => ["error", "pending"].includes(s));
+  $("import").disabled = server.syncing || !server.locks.length;
+  $("add").disabled = !server.locks.length;
+}
+
+function showImport(report) {
+  if (!report) return;
+  const parts = [`Imported ${report.added} new code${report.added === 1 ? "" : "s"}`];
+  if (report.merged) parts.push(`matched ${report.merged} already in the table on another lock`);
+  const issues = [...report.conflicts, ...report.errors];
+  $("notice").replaceChildren(el("div", { textContent: parts.join(", ") + "." }),
+    issues.length ? el("ul", {}, ...issues.map((t) => el("li", { textContent: t }))) : "");
 }
 
 function adopt(state) {
@@ -195,7 +253,8 @@ $("add").addEventListener("click", () => {
   const used = new Set(list.map((r) => r.slot));
   let slot = 1;
   while (used.has(slot)) slot++;
-  list.push({ _id: `n${nextId++}`, slot, name: "", pin: "", enabled: true, notes: "" });
+  list.push({ _id: `n${nextId++}`, slot, name: "", pin: "", enabled: true, notes: "",
+              locks: server.locks.map((l) => l.entity), status: {} });
   render();
   $("rows").lastElementChild.querySelector("input[type=text]").focus();
 });
@@ -211,6 +270,7 @@ $("save").addEventListener("click", busy($("save"), async () => {
     const state = await api("PUT", "api/codes", { rows: draft ?? [] });
     draft = null; errors = {};
     $("discard").disabled = true;
+    $("notice").replaceChildren();
     adopt(state);
   } catch (e) {
     if (e.data?.errors) { errors = e.data.errors; $("save").disabled = false; return; }
@@ -221,13 +281,17 @@ $("save").addEventListener("click", busy($("save"), async () => {
 
 $("retry").addEventListener("click", busy($("retry"), async () => adopt(await api("POST", "api/retry"))));
 $("import").addEventListener("click", busy($("import"), async () => {
-  if (draft && !confirm("Discard unsaved edits and import from the lock?")) return;
+  if (draft && !confirm("Discard unsaved edits and import from the locks?")) return;
   draft = null;
-  adopt(await api("POST", "api/import"));
+  const state = await api("POST", "api/import");
+  adopt(state);
+  showImport(state.imported);
 }));
 $("reveal").addEventListener("change", render);
 
-// Lock configuration: read from the lock only when the section is opened.
+// Lock configuration: read from a lock only when the section is opened.
+function configLock() { return $("config-lock").value; }
+
 function renderConfig(params) {
   const settings = params.filter((p) => p.writeable);
   const info = params.filter((p) => !p.writeable);
@@ -249,14 +313,16 @@ function renderConfig(params) {
     const note = el("span", { className: "note" });
     control.addEventListener("change", async () => {
       const value = Number(control.value);
+      const lock = configLock();
       if (p.pin_length && !confirm(
-        `Change the PIN length to ${value} digits?\n\nEvery code must then be ${value} digits long, and the lock ` +
-        `may erase its existing codes. Codes in the table that are ${value} digits will be written to the lock again; ` +
+        `Change the PIN length on ${labelOf(lock)} to ${value} digits?\n\nEvery code on it must then be ${value} digits long, ` +
+        `and the lock may erase its existing codes. Codes in the table that are ${value} digits will be written to it again; ` +
         `edit the others to ${value} digits and save.`)) { control.value = p.value; return; }
       control.disabled = true;
       note.className = "note msg"; note.textContent = "Saving…";
       try {
-        const data = await api("PUT", "api/config", { property: p.property, property_key: p.property_key, endpoint: p.endpoint, value });
+        const data = await api("PUT", "api/config", { lock, property: p.property, property_key: p.property_key,
+                                                      endpoint: p.endpoint, value });
         renderConfig(data.params);
         refresh();
       } catch (e) {
@@ -278,17 +344,34 @@ function renderConfig(params) {
   }
 }
 
-$("config").addEventListener("toggle", async () => {
-  if (!$("config").open) return;
+async function loadConfig() {
+  const lock = configLock();
+  if (!lock) {
+    $("config-body").replaceChildren(el("p", { className: "msg", textContent: "No locks are set up yet." }));
+    return;
+  }
   $("config-body").replaceChildren(el("p", { className: "msg", textContent: "Reading settings…" }));
   try {
-    renderConfig((await api("GET", "api/config")).params);
+    renderConfig((await api("GET", `api/config?lock=${encodeURIComponent(lock)}`)).params);
   } catch (e) {
     $("config-body").replaceChildren(el("p", { className: "err", textContent: `Could not read settings: ${e.message}` }));
   }
-});
+}
 
-refresh().catch((e) => { $("banner").textContent = e.message; });
+$("config").addEventListener("toggle", async () => {
+  if (!$("config").open) return;
+  await loaded.catch(() => {});
+  const picker = $("config-lock");
+  const current = picker.value;
+  picker.replaceChildren(...server.locks.map((l) => el("option", { value: l.entity, textContent: l.label,
+                                                                   selected: l.entity === current })));
+  $("picker").hidden = !multi();
+  loadConfig();
+});
+$("config-lock").addEventListener("change", loadConfig);
+
+const loaded = refresh();
+loaded.catch((e) => { $("banner").textContent = e.message; });
 </script>
 </body>
 </html>

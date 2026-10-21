@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0
+
+- Several locks share one code table. Each code has a checkbox per lock and
+  keeps the same slot number on every lock it's ticked for.
+- Status is shown per lock, and a lock that doesn't respond no longer holds
+  up the others.
+- Import from locks merges matching codes into one row and lists conflicts
+  instead of guessing.
+- Lock configuration has a lock picker.
+- The **Lock entity** option is replaced by **Locks**; the old setting is
+  still read so existing codes stay attached to that lock.
+
 ## 0.2.0
 
 - Lock configuration section above the code table (collapsed by default):

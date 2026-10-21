@@ -1,7 +1,7 @@
 name: Z-Wave Lock Codes
-version: "0.2.0"
+version: "0.3.0"
 slug: zwave_lock_codes
-description: Manage Z-Wave lock user codes from a table, synced to the lock on save
+description: Manage Z-Wave lock user codes from one table, synced to your locks on save
 url: https://github.com/wrcrooks/ZWaveLockCodes
 arch:
   - aarch64
@@ -13,8 +13,11 @@ panel_icon: mdi:lock-smart
 panel_title: Lock Codes
 homeassistant_api: true
 options:
-  lock_entity: lock.front_door
+  locks: []
   log_level: info
 schema:
-  lock_entity: match(^lock\.[a-z0-9_]+$)
+  locks:
+    - match(^lock\.[a-z0-9_]+$)
+  # Single-lock setting from before 0.3.0; still read so upgrades keep their lock.
+  lock_entity: match(^lock\.[a-z0-9_]+$)?
   log_level: list(debug|info|warning|error)
