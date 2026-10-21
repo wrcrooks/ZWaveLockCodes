@@ -1,0 +1,7 @@
+configuration:
+  lock_entity:
+    name: Lock entity
+    description: The Z-Wave JS lock entity whose codes this add-on manages, e.g. lock.front_door.
+  log_level:
+    name: Log level
+    description: How much to log. PINs are never logged.

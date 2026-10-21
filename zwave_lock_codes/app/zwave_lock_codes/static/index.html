@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lock Codes</title>
+<style>
+  :root {
+    --bg: #fafafa; --card: #fff; --text: #1c1c1c; --muted: #6b6b6b; --line: #e3e3e3;
+    --accent: #03a9f4; --ok: #2e7d32; --warn: #b26a00; --err: #c62828; --input: #fff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111; --card: #1c1c1c; --text: #e1e1e1; --muted: #9b9b9b; --line: #333;
+      --accent: #4fc3f7; --ok: #81c784; --warn: #ffb74d; --err: #ef9a9a; --input: #262626;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-bottom: 12px; }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  .lock { color: var(--muted); }
+  .spacer { flex: 1; }
+  button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line);
+           background: var(--card); color: var(--text); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
+  th { font-weight: 600; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
+  tr:last-child td { border-bottom: 0; }
+  input[type=text], input[type=number], input[type=password] {
+    font: inherit; width: 100%; min-width: 60px; padding: 4px 6px; border: 1px solid var(--line);
+    border-radius: 4px; background: var(--input); color: var(--text); }
+  input.slot { width: 64px; }
+  input.pin { width: 110px; font-variant-numeric: tabular-nums; }
+  tr.deleted td { opacity: .55; text-decoration: line-through; }
+  tr.invalid input { border-color: var(--err); }
+  .err { color: var(--err); font-size: 12px; }
+  .chip { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; white-space: nowrap;
+          border: 1px solid currentColor; }
+  .synced { color: var(--ok); } .unverified { color: var(--ok); border-style: dashed; }
+  .pending, .writing { color: var(--warn); } .error { color: var(--err); }
+  .msg { color: var(--muted); font-size: 12px; }
+  .banner { margin: 0 0 12px; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--err); color: var(--err); }
+  .banner:empty { display: none; }
+  .empty { padding: 24px; text-align: center; color: var(--muted); }
+  label.toggle { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Lock Codes</h1>
+    <span class="lock" id="lock"></span>
+    <span class="spacer"></span>
+    <label class="toggle"><input type="checkbox" id="reveal"> Show PINs</label>
+    <button id="import" title="Add codes already on the lock to empty rows">Import from lock</button>
+    <button id="retry" title="Try failed or pending slots again">Retry</button>
+    <button id="add">Add code</button>
+    <button id="discard" disabled>Discard</button>
+    <button id="save" class="primary" disabled>Save &amp; sync</button>
+  </header>
+  <p class="banner" id="banner"></p>
+  <div class="card">
+    <table>
+      <thead><tr><th>Slot</th><th>Name</th><th>PIN</th><th>Enabled</th><th>Notes</th><th>Status</th><th></th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let server = { rows: [] };   // last state from the add-on
+let draft = null;            // the user's unsaved edits, or null
+let errors = {};
+let pollTimer = null;
+let nextId = 0;
+
+const LABELS = { synced: "Synced", unverified: "Synced (hidden)", pending: "Pending",
+                 writing: "Writing…", error: "Error" };
+
+async function api(method, path, body) {
+  const res = await fetch(path, { method, headers: { "Content-Type": "application/json" },
+                                  body: body ? JSON.stringify(body) : undefined });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(data.message || res.statusText), { data });
+  return data;
+}
+
+function rows() { return draft ?? server.rows; }
+
+function edit() {
+  if (!draft) draft = server.rows.filter((r) => !r.deleted).map((r) => ({ ...r }));
+  $("save").disabled = $("discard").disabled = false;
+  return draft;
+}
+
+function el(tag, props = {}, ...kids) {
+  const e = Object.assign(document.createElement(tag), props);
+  e.append(...kids);
+  return e;
+}
+
+function render() {
+  $("lock").textContent = server.lock || "";
+  $("banner").textContent = server.error ? `Last sync failed: ${server.error}` : "";
+  const reveal = $("reveal").checked;
+  const body = $("rows");
+  body.replaceChildren();
+  const list = rows();
+  if (!list.length) {
+    body.append(el("tr", {}, el("td", { colSpan: 7, className: "empty",
+      textContent: "No codes yet. Add one, or import what's already on the lock." })));
+  }
+  for (const r of list) {
+    const tr = el("tr", { className: (r.deleted ? "deleted " : "") + (errors[r.slot] ? "invalid" : "") });
+    const bind = (input, key, conv = (v) => v) => {
+      input.addEventListener("input", () => {
+        const target = edit().find((x) => x._id === r._id);
+        target[key] = conv(input.type === "checkbox" ? input.checked : input.value);
+      });
+      input.disabled = !!r.deleted;
+      return input;
+    };
+    const slot = bind(el("input", { type: "number", className: "slot", min: 1, max: server.max_slots || 250, value: r.slot }),
+                      "slot", Number);
+    const name = bind(el("input", { type: "text", value: r.name || "", maxLength: 64, placeholder: "Name" }), "name");
+    const pin = bind(el("input", { type: reveal ? "text" : "password", className: "pin", value: r.pin ?? "",
+                                   inputMode: "numeric", maxLength: 8, autocomplete: "off",
+                                   placeholder: r.pin === null ? "hidden on lock" : "4–8 digits" }), "pin");
+    const enabled = bind(el("input", { type: "checkbox", checked: r.enabled !== false }), "enabled");
+    const notes = bind(el("input", { type: "text", value: r.notes || "", maxLength: 256 }), "notes");
+    const st = r.status;
+    const status = st ? el("div", {}, el("span", { className: `chip ${st.state}`, textContent: r.deleted && st.state !== "error" ? "Clearing" : LABELS[st.state] || st.state }),
+                           st.message ? el("div", { className: "msg", textContent: st.message }) : "")
+                      : el("span", { className: "msg", textContent: "Unsaved" });
+    const del = el("button", { textContent: "Delete", disabled: !!r.deleted, title: "Remove and clear this slot on the lock" });
+    del.addEventListener("click", () => { draft = edit().filter((x) => x._id !== r._id); render(); });
+    tr.append(el("td", {}, slot), el("td", {}, name), el("td", {}, pin), el("td", {}, enabled),
+              el("td", {}, notes), el("td", {}, status, errors[r.slot] ? el("div", { className: "err", textContent: errors[r.slot] }) : ""),
+              el("td", {}, del));
+    body.append(tr);
+  }
+  $("retry").disabled = server.syncing || !server.rows.some((r) => ["error", "pending"].includes(r.status?.state));
+  $("import").disabled = server.syncing;
+}
+
+function adopt(state) {
+  for (const r of state.rows) r._id = `s${r.slot}`;
+  server = state;
+  render();
+  clearTimeout(pollTimer);
+  // Poll only while the add-on is writing; otherwise nothing changes on its own.
+  if (state.syncing) pollTimer = setTimeout(refresh, 1500);
+}
+
+async function refresh() { adopt(await api("GET", "api/state")); }
+
+function busy(button, fn) {
+  return async () => {
+    button.disabled = true;
+    try { await fn(); } catch (e) { alert(e.message); } finally { render(); }
+  };
+}
+
+$("add").addEventListener("click", () => {
+  const list = edit();
+  const used = new Set(list.map((r) => r.slot));
+  let slot = 1;
+  while (used.has(slot)) slot++;
+  list.push({ _id: `n${nextId++}`, slot, name: "", pin: "", enabled: true, notes: "" });
+  render();
+  $("rows").lastElementChild.querySelector("input[type=text]").focus();
+});
+
+$("discard").addEventListener("click", () => {
+  draft = null; errors = {};
+  $("save").disabled = $("discard").disabled = true;
+  render();
+});
+
+$("save").addEventListener("click", busy($("save"), async () => {
+  try {
+    const state = await api("PUT", "api/codes", { rows: draft ?? [] });
+    draft = null; errors = {};
+    $("discard").disabled = true;
+    adopt(state);
+  } catch (e) {
+    if (e.data?.errors) { errors = e.data.errors; $("save").disabled = false; return; }
+    $("save").disabled = false;
+    throw e;
+  }
+}));
+
+$("retry").addEventListener("click", busy($("retry"), async () => adopt(await api("POST", "api/retry"))));
+$("import").addEventListener("click", busy($("import"), async () => {
+  if (draft && !confirm("Discard unsaved edits and import from the lock?")) return;
+  draft = null;
+  adopt(await api("POST", "api/import"));
+}));
+$("reveal").addEventListener("change", render);
+
+refresh().catch((e) => { $("banner").textContent = e.message; });
+</script>
+</body>
+</html>
