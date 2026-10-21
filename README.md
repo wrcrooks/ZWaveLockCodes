@@ -36,3 +36,8 @@ mkdir -p /tmp/lc && cd zwave_lock_codes/app && DATA_DIR=/tmp/lc \
 The Z-Wave slot-reading rules in `zwave_lock_codes/app/zwave_lock_codes/zwave.py`
 are adapted from [raman325/lock_code_manager](https://github.com/raman325/lock_code_manager)
 (MIT).
+
+## License
+
+[MIT](LICENSE). Includes code adapted from lock_code_manager, also MIT; its
+notice is in the same file.
