@@ -13,6 +13,10 @@ _LOGGER = logging.getLogger(__name__)
 class HAError(Exception):
     """A Home Assistant command failed or the connection was lost."""
 
+    def __init__(self, message: str, code: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.code = code
+
 
 def _endpoint() -> tuple:
     """Return (websocket URL, token): Supervisor when present, else HA_URL/HA_TOKEN."""
@@ -99,7 +103,7 @@ class HAClient:
             raise HAError(f"{payload.get('type')} timed out") from err
         if not reply.get("success"):
             error = reply.get("error") or {}
-            raise HAError(error.get("message") or error.get("code") or "unknown error")
+            raise HAError(error.get("message") or error.get("code") or "unknown error", error.get("code"))
         return reply.get("result")
 
     async def call_service(

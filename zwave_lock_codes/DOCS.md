@@ -4,6 +4,14 @@ One table of user codes for all your Z-Wave locks, opened from the Home
 Assistant sidebar. Edit the table, press **Save & sync**, and only the slots
 you changed are written to the locks.
 
+## Requirements
+
+Home Assistant 2024.11 or later, with your locks on the official Z-Wave JS
+integration. On 2026.3 or later the add-on reads codes from Z-Wave JS's cache
+at no radio cost. On older versions it asks the lock directly: a write costs
+one extra read-back, and **Import from locks** reads every slot, which can
+take a minute on a BE469ZP.
+
 ## Setup
 
 1. On the **Configuration** tab, add your lock entities under **Locks** (for
@@ -33,8 +41,8 @@ you changed are written to the locks.
   with `zwave_js.set_lock_usercode` or cleared with
   `zwave_js.clear_lock_usercode`, one at a time, lock by lock. Changing a
   name or notes never touches a lock.
-- After each write the add-on reads the slot back from Z-Wave JS's cache (no
-  extra radio traffic) and shows the result for each lock in **Status**:
+- After each write the add-on reads the slot back (from Z-Wave JS's cache on
+  Home Assistant 2026.3+) and shows the result for each lock in **Status**:
   - **Synced**: the lock holds exactly that PIN.
   - **Synced (hidden)**: the lock hides its codes, but the slot is occupied.
   - **Not on lock**: the code was imported from a lock that hides it, so it

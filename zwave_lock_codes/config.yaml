@@ -1,5 +1,5 @@
 name: Z-Wave Lock Codes
-version: "0.3.0"
+version: "0.3.1"
 slug: zwave_lock_codes
 description: Manage Z-Wave lock user codes from one table, synced to your locks on save
 url: https://github.com/wrcrooks/ZWaveLockCodes

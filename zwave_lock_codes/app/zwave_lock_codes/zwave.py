@@ -18,6 +18,11 @@ import re
 from dataclasses import dataclass
 from typing import Any, Optional
 
+USER_CODE_CC = 99
+# User Code CC userIdStatus values that say nothing about the slot's contents.
+_STATUS_AVAILABLE = 0
+_STATUS_NOT_AVAILABLE = 0xFE
+
 # Access Control notification (Notification CC type 6), event 15:
 # "New user code not added due to duplicate code".
 NOTIFICATION_CC = 113
@@ -57,6 +62,18 @@ def read_slot(usercode: Any, in_use: Optional[bool]) -> SlotReading:
     if is_masked_code(code):
         return SlotReading(HIDDEN) if in_use is not False else SlotReading(EMPTY)
     return SlotReading(KNOWN, code)
+
+
+def usercode_entry(result: Any) -> dict:
+    """Shape a User Code CC ``get`` result like a ``get_lock_usercode`` entry."""
+    result = result if isinstance(result, dict) else {}
+    code = result.get("userCode")
+    if isinstance(code, dict) and code.get("type") == "Buffer":
+        # Codes that aren't plain digits come back as a serialized Node.js Buffer.
+        code = bytes(code.get("data") or []).decode("latin-1")
+    status = result.get("userIdStatus")
+    in_use = None if status in (None, _STATUS_NOT_AVAILABLE) else status != _STATUS_AVAILABLE
+    return {"usercode": code or "", "in_use": in_use}
 
 
 def is_duplicate_refusal(event_data: dict, device_id: Optional[str]) -> bool:

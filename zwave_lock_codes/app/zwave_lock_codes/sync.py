@@ -41,11 +41,20 @@ class Syncer:
         self._writing_device: Optional[str] = None
         self._refused = False
         self._devices: dict = {}
+        # Whether Home Assistant has zwave_js.get_lock_usercode (2026.3+); None until tried.
+        self._cache_reads: Optional[bool] = None
+        self._import_task: Optional[asyncio.Task] = None
         self.last_error: Optional[str] = None
+        self.last_import: Optional[dict] = None
+        self.progress: Optional[str] = None
 
     @property
     def busy(self) -> bool:
         return self._task is not None and not self._task.done()
+
+    @property
+    def importing(self) -> bool:
+        return self._import_task is not None and not self._import_task.done()
 
     def request(self) -> None:
         if self.busy:
@@ -123,15 +132,66 @@ class Syncer:
     async def _learn_lock(self, ha: HAClient, lock: str, device_id: str) -> None:
         """Fill in slot count and PIN length the first time; both are cache reads."""
         if not self.store.info(lock, "max_slots"):
-            codes = await self._read_codes(ha, lock)
-            if codes:
-                self.store.set_max_slots(lock, max(int(k) for k in codes))
+            self.store.set_max_slots(lock, await self._slot_count(ha, lock))
         if not self.store.info(lock, "pin_length"):
             await self._read_config(ha, lock, device_id)
 
+    async def _cache_available(self, ha: HAClient, lock: str) -> bool:
+        """Return whether Home Assistant has zwave_js.get_lock_usercode (2026.3+); asked once."""
+        if self._cache_reads is None:
+            try:
+                await ha.call_service(
+                    "zwave_js", "get_lock_usercode", {"code_slot": 1}, lock, response=True
+                )
+                self._cache_reads = True
+            except HAError as err:
+                if err.code != "not_found":
+                    raise
+                _LOGGER.info("zwave_js.get_lock_usercode isn't available; asking the locks directly")
+                self._cache_reads = False
+        return self._cache_reads
+
+    async def _slot_count(self, ha: HAClient, lock: str) -> int:
+        """Return how many code slots a lock has, without reading every slot over the radio."""
+        if await self._cache_available(ha, lock):
+            codes = await self._read_codes(ha, lock)
+            return max(int(k) for k in codes) if codes else 0
+        count = await self._invoke_user_code(ha, await self._device_id(ha, lock), "getUsersCount", [])
+        if not isinstance(count, int) or count < 1:
+            raise HAError(f"{lock_label(lock)} did not report how many code slots it has")
+        return count
+
     async def _read_codes(self, ha: HAClient, lock: str, slot: Optional[int] = None) -> dict:
-        data = {} if slot is None else {"code_slot": slot}
-        return await ha.call_service("zwave_js", "get_lock_usercode", data, lock, response=True) or {}
+        """
+        Return {"<slot>": {"usercode", "in_use"}} for one slot or all of them.
+
+        Home Assistant 2026.3+ answers from Z-Wave JS's cache. Older versions
+        lack that action, so the lock is asked directly, one slot at a time.
+        """
+        if await self._cache_available(ha, lock):
+            data = {} if slot is None else {"code_slot": slot}
+            return await ha.call_service("zwave_js", "get_lock_usercode", data, lock, response=True) or {}
+        device_id = await self._device_id(ha, lock)
+        slots = [slot] if slot is not None else range(1, await self._slot_count(ha, lock) + 1)
+        codes = {}
+        for number in slots:
+            if slot is None:
+                self.progress = f"Reading {lock_label(lock)} slot {number} of {len(slots)}"
+            result = await self._invoke_user_code(ha, device_id, "get", [number])
+            codes[str(number)] = zwave.usercode_entry(result)
+        return codes
+
+    async def _invoke_user_code(self, ha: HAClient, device_id: str, method: str, parameters: list):
+        return await ha.command(
+            {
+                "type": "zwave_js/invoke_cc_api",
+                "device_id": device_id,
+                "command_class": zwave.USER_CODE_CC,
+                "method_name": method,
+                "parameters": parameters,
+                "wait_for_result": True,
+            }
+        )
 
     # Lock configuration
 
@@ -246,6 +306,27 @@ class Syncer:
 
     # Importing
 
+    def start_import(self) -> None:
+        """Import in the background; reading a slow lock slot by slot can take a minute."""
+        if not self.importing:
+            self.last_import = None
+            self._import_task = asyncio.create_task(self._import())
+
+    async def _import(self) -> None:
+        try:
+            report = await self.import_from_locks()
+            _LOGGER.info(
+                "Imported codes: %s added, %s merged, %s conflicts",
+                report["added"],
+                report["merged"],
+                len(report["conflicts"]),
+            )
+            self.last_import = report
+        except HAError as err:
+            self.last_import = {"added": 0, "merged": 0, "conflicts": [], "errors": [str(err)]}
+        finally:
+            self.progress = None
+
     async def import_from_locks(self) -> dict:
         """
         Adopt codes already on the locks into the table.
@@ -259,6 +340,7 @@ class Syncer:
         async with self._io, self._client_factory() as ha:
             for lock in self.store.locks:
                 try:
+                    self.progress = f"Reading {lock_label(lock)}"
                     found[lock] = await self._read_codes(ha, lock)
                 except HAError as err:
                     report["errors"].append(f"{lock_label(lock)}: {err}")

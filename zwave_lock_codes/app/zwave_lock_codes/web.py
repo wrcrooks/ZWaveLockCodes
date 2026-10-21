@@ -14,13 +14,15 @@ STATIC = Path(__file__).parent / "static"
 
 
 def build_app(store: Store, syncer: Syncer) -> web.Application:
-    def state(**extra) -> web.Response:
+    def state() -> web.Response:
         return web.json_response(
             {
                 **store.snapshot(),
                 "syncing": syncer.busy,
+                "importing": syncer.importing,
+                "progress": syncer.progress,
+                "imported": syncer.last_import,
                 "error": syncer.last_error,
-                **extra,
             }
         )
 
@@ -53,17 +55,8 @@ def build_app(store: Store, syncer: Syncer) -> web.Application:
     async def post_import(request: web.Request) -> web.Response:
         if syncer.busy:
             return web.json_response({"message": "Wait for the current sync to finish"}, status=409)
-        try:
-            report = await syncer.import_from_locks()
-        except HAError as err:
-            return web.json_response({"message": str(err)}, status=502)
-        _LOGGER.info(
-            "Imported codes: %s added, %s merged, %s conflicts",
-            report["added"],
-            report["merged"],
-            len(report["conflicts"]),
-        )
-        return state(imported=report)
+        syncer.start_import()
+        return state()
 
     async def get_config(request: web.Request) -> web.Response:
         lock = lock_from(request.query.get("lock"))

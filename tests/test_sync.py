@@ -30,6 +30,7 @@ class FakeLock:
         # Configuration parameters as Z-Wave JS reports them for a BE469ZP.
         self.config = {4: 0, 15: 0, 16: pin_length}
         self.reject_config = False
+        self.radio_reads = 0
 
 
 class FakeHA:
@@ -37,9 +38,11 @@ class FakeHA:
 
     sessions = 0
 
-    def __init__(self, locks):
+    def __init__(self, locks, old_ha=False):
         self.locks = locks
         self.handler = None
+        # Home Assistant before 2026.3 has no zwave_js.get_lock_usercode.
+        self.old_ha = old_ha
 
     async def __aenter__(self):
         FakeHA.sessions += 1
@@ -59,6 +62,15 @@ class FakeHA:
 
     async def command(self, payload):
         lock = self._by_device(payload["device_id"])
+        if payload["type"] == "zwave_js/invoke_cc_api":
+            assert payload["command_class"] == 99 and payload["wait_for_result"] is True
+            lock.radio_reads += 1
+            if lock.dead:
+                raise HAError("Timed out", "ZwaveJSServerError")
+            if payload["method_name"] == "getUsersCount":
+                return len(lock.codes)
+            entry = self._entry(lock, payload["parameters"][0])
+            return {"userIdStatus": 1 if entry["in_use"] else 0, "userCode": entry["usercode"]}
         if payload["type"] == "zwave_js/get_config_parameters":
             labels = {4: "Vacation Mode", 15: "Auto Lock", 16: "User Code PIN Length"}
             return {
@@ -91,6 +103,8 @@ class FakeHA:
         lock = self.locks[entity_id]
         slot = data.get("code_slot")
         if service == "get_lock_usercode":
+            if self.old_ha:
+                raise HAError("Service zwave_js.get_lock_usercode not found.", "not_found")
             slots = [slot] if slot else lock.codes
             return {str(s): self._entry(lock, s) for s in slots}
         lock.writes.append((service, slot))
@@ -108,12 +122,12 @@ class FakeHA:
         return None
 
 
-def make(tmp_path, *specs):
+def make(tmp_path, *specs, old_ha=False):
     """Build a store and syncer over fake locks: make(tmp_path, (FRONT, {...}), ...)."""
     specs = specs or ((FRONT, {}),)
     locks = {entity: FakeLock(f"dev-{entity}", **kw) for entity, kw in specs}
     store = Store(str(tmp_path / "codes.json"), list(locks))
-    syncer = Syncer(store, lambda: FakeHA(locks))
+    syncer = Syncer(store, lambda: FakeHA(locks, old_ha))
     return locks, store, syncer
 
 
@@ -468,3 +482,65 @@ def test_config_params_shape():
     assert params[0]["states"] == [[0, "Disable"], [255, "Enable"]]
     assert params[1]["writeable"] is False
     assert zwave.pin_length_from(params) == 4
+
+
+# Home Assistant before 2026.3 (no zwave_js.get_lock_usercode)
+
+
+def test_old_ha_writes_and_verifies_by_asking_the_lock(tmp_path):
+    async def go():
+        locks, store, syncer = make(tmp_path, old_ha=True)
+        lock = locks[FRONT]
+        await save(store, syncer, [row(1, "1111"), row(2, "2222")])
+        assert lock.codes[1] == "1111" and store.status[FRONT][1]["state"] == SYNCED
+        assert store.info(FRONT, "max_slots") == 30
+        # One count query, then one read-back per written slot.
+        assert lock.radio_reads == 3
+
+    asyncio.run(go())
+
+
+def test_old_ha_import_runs_in_background(tmp_path):
+    async def go():
+        locks, store, syncer = make(tmp_path, (FRONT, {"slots": 10}), (BACK, {"masked": True}), old_ha=True)
+        locks[FRONT].codes.update({1: "1111", 3: "3333"})
+        locks[BACK].codes.update({1: "1111"})
+        syncer.start_import()
+        assert syncer.importing
+        await syncer._import_task
+        report = syncer.last_import
+        assert report["added"] == 2 and report["merged"] == 0 and report["errors"] == []
+        assert store.rows[1]["pin"] == "1111" and store.rows[3]["pin"] == "3333"
+        # The back door hides codes, so its slot 1 can't be matched to the front's.
+        assert "hidden code" in report["conflicts"][0]
+        assert locks[FRONT].radio_reads == 11 and syncer.progress is None
+
+    asyncio.run(go())
+
+
+def test_old_ha_dead_lock_import_reports_and_continues(tmp_path):
+    async def go():
+        locks, store, syncer = make(tmp_path, (FRONT, {}), (BACK, {}), old_ha=True)
+        locks[FRONT].dead = True
+        locks[BACK].codes[2] = "2222"
+        syncer.start_import()
+        await syncer._import_task
+        assert syncer.last_import["errors"] == ["Front door: Timed out"]
+        assert store.rows[2]["locks"] == [BACK]
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize(
+    "result, entry",
+    [
+        ({"userIdStatus": 1, "userCode": "1234"}, {"usercode": "1234", "in_use": True}),
+        ({"userIdStatus": 0, "userCode": "0000"}, {"usercode": "0000", "in_use": False}),
+        ({"userIdStatus": 1, "userCode": {"type": "Buffer", "data": [42, 42, 42, 42]}},
+         {"usercode": "****", "in_use": True}),
+        ({"userIdStatus": 254, "userCode": ""}, {"usercode": "", "in_use": None}),
+        (None, {"usercode": "", "in_use": None}),
+    ],
+)
+def test_usercode_entry(result, entry):
+    assert zwave.usercode_entry(result) == entry

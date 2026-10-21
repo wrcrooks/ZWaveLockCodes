@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import aiohttp
+import pytest
 from aiohttp import web
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "zwave_lock_codes" / "app"))
@@ -18,7 +19,7 @@ LOCK = "lock.front_door"
 TOKEN = "test-token"
 
 
-def fake_home_assistant(codes: dict, log: list, config: dict) -> web.Application:
+def fake_home_assistant(codes: dict, log: list, config: dict, old_ha: bool = False) -> web.Application:
     async def websocket(request):
         ws = web.WebSocketResponse()
         await ws.prepare(request)
@@ -37,6 +38,11 @@ def fake_home_assistant(codes: dict, log: list, config: dict) -> web.Application
             elif req["type"] == "call_service":
                 data, service = req["service_data"], req["service"]
                 assert req["target"] == {"entity_id": LOCK}
+                if service == "get_lock_usercode" and old_ha:
+                    await ws.send_json({"id": req["id"], "type": "result", "success": False,
+                                        "error": {"code": "not_found",
+                                                  "message": "Service zwave_js.get_lock_usercode not found."}})
+                    continue
                 if service == "get_lock_usercode":
                     slots = [data["code_slot"]] if "code_slot" in data else codes
                     resp = {str(s): {"usercode": codes[s], "in_use": bool(codes[s])} for s in slots}
@@ -49,6 +55,12 @@ def fake_home_assistant(codes: dict, log: list, config: dict) -> web.Application
                     result = {"context": {}}
             elif req["type"] == "subscribe_events":
                 result = None
+            elif req["type"] == "zwave_js/invoke_cc_api":
+                if req["method_name"] == "getUsersCount":
+                    result = len(codes)
+                else:
+                    code = codes[req["parameters"][0]]
+                    result = {"userIdStatus": 1 if code else 0, "userCode": code}
             elif req["type"] == "zwave_js/get_config_parameters":
                 assert req["device_id"] == "dev1"
                 result = {
@@ -79,13 +91,14 @@ async def serve(app):
     return runner, f"http://127.0.0.1:{port}"
 
 
-def test_end_to_end(tmp_path, monkeypatch):
+@pytest.mark.parametrize("old_ha", [False, True], ids=["ha-2026.3+", "older-ha"])
+def test_end_to_end(tmp_path, monkeypatch, old_ha):
     async def go():
         codes = {n: "" for n in range(1, 31)}
         codes[7] = "7777"
         log: list = []
         config = {4: 0, 16: 4}
-        ha_runner, ha_url = await serve(fake_home_assistant(codes, log, config))
+        ha_runner, ha_url = await serve(fake_home_assistant(codes, log, config, old_ha))
         monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
         monkeypatch.setenv("HA_URL", ha_url)
         monkeypatch.setenv("HA_TOKEN", TOKEN)
@@ -99,6 +112,10 @@ def test_end_to_end(tmp_path, monkeypatch):
                     assert res.status == 200 and "<title>Lock Codes</title>" in await res.text()
 
                 async with http.post(ui_url + "/api/import") as res:
+                    assert (await res.json())["importing"] is True
+                while syncer.importing:
+                    await asyncio.sleep(0.01)
+                async with http.get(ui_url + "/api/state") as res:
                     state = await res.json()
                 assert [r["slot"] for r in state["rows"]] == [7]
                 assert state["locks"] == [{"entity": LOCK, "label": "Front door", "max_slots": 30, "pin_length": None}]

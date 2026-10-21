@@ -217,7 +217,7 @@ function render() {
   }
   const states = server.rows.flatMap((r) => Object.values(r.status || {}).map((s) => s.state));
   $("retry").disabled = server.syncing || !states.some((s) => ["error", "pending"].includes(s));
-  $("import").disabled = server.syncing || !server.locks.length;
+  $("import").disabled = server.syncing || server.importing || !server.locks.length;
   $("add").disabled = !server.locks.length;
 }
 
@@ -231,12 +231,15 @@ function showImport(report) {
 }
 
 function adopt(state) {
+  const wasImporting = server.importing;
   for (const r of state.rows) r._id = `s${r.slot}`;
   server = state;
   render();
+  if (state.importing) $("notice").replaceChildren(el("div", { textContent: `${state.progress || "Reading locks"}…` }));
+  else if (wasImporting) showImport(state.imported);
   clearTimeout(pollTimer);
-  // Poll only while the add-on is writing; otherwise nothing changes on its own.
-  if (state.syncing) pollTimer = setTimeout(refresh, 1500);
+  // Poll only while the add-on is working; otherwise nothing changes on its own.
+  if (state.syncing || state.importing) pollTimer = setTimeout(refresh, 1500);
 }
 
 async function refresh() { adopt(await api("GET", "api/state")); }
@@ -283,9 +286,7 @@ $("retry").addEventListener("click", busy($("retry"), async () => adopt(await ap
 $("import").addEventListener("click", busy($("import"), async () => {
   if (draft && !confirm("Discard unsaved edits and import from the locks?")) return;
   draft = null;
-  const state = await api("POST", "api/import");
-  adopt(state);
-  showImport(state.imported);
+  adopt(await api("POST", "api/import"));
 }));
 $("reveal").addEventListener("change", render);
 

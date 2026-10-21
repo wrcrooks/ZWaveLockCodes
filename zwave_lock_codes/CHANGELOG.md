@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1
+
+- Works with Home Assistant 2024.11 and later. Versions before 2026.3 don't
+  have `zwave_js.get_lock_usercode`, so the add-on now asks the lock directly
+  instead of failing with "Service zwave_js.get_lock_usercode not found".
+- Import runs in the background and shows which slot it's reading, since
+  reading a lock slot by slot can take a minute.
+
 ## 0.3.0
 
 - Several locks share one code table. Each code has a checkbox per lock and
