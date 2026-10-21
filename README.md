@@ -40,4 +40,4 @@ are adapted from [raman325/lock_code_manager](https://github.com/raman325/lock_c
 ## License
 
 [MIT](LICENSE). Includes code adapted from lock_code_manager, also MIT; its
-notice is in the same file.
+notice is in [NOTICE](NOTICE).
