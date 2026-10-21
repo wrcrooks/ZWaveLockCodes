@@ -18,7 +18,7 @@ LOCK = "lock.front_door"
 TOKEN = "test-token"
 
 
-def fake_home_assistant(codes: dict, log: list) -> web.Application:
+def fake_home_assistant(codes: dict, log: list, config: dict) -> web.Application:
     async def websocket(request):
         ws = web.WebSocketResponse()
         await ws.prepare(request)
@@ -49,6 +49,19 @@ def fake_home_assistant(codes: dict, log: list) -> web.Application:
                     result = {"context": {}}
             elif req["type"] == "subscribe_events":
                 result = None
+            elif req["type"] == "zwave_js/get_config_parameters":
+                assert req["device_id"] == "dev1"
+                result = {
+                    "7-112-0-4": {"property": 4, "property_key": None, "endpoint": 0, "value": config[4],
+                                  "metadata": {"label": "Vacation Mode", "writeable": True,
+                                               "states": {"0": "Disable", "255": "Enable"}}},
+                    "7-112-0-16": {"property": 16, "property_key": None, "endpoint": 0, "value": config[16],
+                                   "metadata": {"label": "User Code PIN Length", "writeable": True,
+                                                "min": 4, "max": 8}},
+                }
+            elif req["type"] == "zwave_js/set_config_parameter":
+                config[req["property"]] = req["value"]
+                result = {"value_id": f"7-112-0-{req['property']}", "status": 255}
             await ws.send_json({"id": req["id"], "type": "result", "success": True, "result": result})
         return ws
 
@@ -71,7 +84,8 @@ def test_end_to_end(tmp_path, monkeypatch):
         codes = {n: "" for n in range(1, 31)}
         codes[7] = "7777"
         log: list = []
-        ha_runner, ha_url = await serve(fake_home_assistant(codes, log))
+        config = {4: 0, 16: 4}
+        ha_runner, ha_url = await serve(fake_home_assistant(codes, log, config))
         monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
         monkeypatch.setenv("HA_URL", ha_url)
         monkeypatch.setenv("HA_TOKEN", TOKEN)
@@ -106,6 +120,17 @@ def test_end_to_end(tmp_path, monkeypatch):
                 assert {r["slot"]: r["status"]["state"] for r in state["rows"]} == {2: "synced", 7: "synced"}
                 assert not state["syncing"] and state["error"] is None
 
+                async with http.get(ui_url + "/api/config") as res:
+                    data = await res.json()
+                assert [p["label"] for p in data["params"]] == ["Vacation Mode", "User Code PIN Length"]
+                assert data["pin_length"] == 4
+
+                body = {"property": 4, "property_key": None, "endpoint": 0, "value": 255}
+                async with http.put(ui_url + "/api/config", json=body) as res:
+                    data = await res.json()
+                assert config[4] == 255 and data["params"][0]["value"] == 255
+
+            log = [r for r in log if not r["type"].startswith("zwave_js/")]
             writes = [r["service"] for r in log if r["type"] == "call_service" and r["service"] != "get_lock_usercode"]
             assert writes == ["set_lock_usercode"], "only slot 2 changed"
 

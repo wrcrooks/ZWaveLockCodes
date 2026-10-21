@@ -7,6 +7,8 @@ Each slot has three layers:
 * ``applied``: the PIN this add-on last confirmed on the lock for that slot.
   A slot missing from ``applied`` was never written by us, and is never
   touched unless the user puts a row on it.
+  ``UNKNOWN`` marks a slot we wrote but can no longer vouch for (the lock's
+  PIN length changed, which can erase codes), so it is written again.
 * ``status``: the outcome of the last write, for display.
 
 A slot needs a write exactly when what it should hold differs from
@@ -28,6 +30,8 @@ UNVERIFIED = "unverified"
 PENDING = "pending"
 WRITING = "writing"
 ERROR = "error"
+
+UNKNOWN = "?"
 
 
 class ValidationError(Exception):
@@ -59,6 +63,7 @@ class Store:
         self.applied: dict = {}
         self.status: dict = {}
         self.max_slots: Optional[int] = None
+        self.pin_length: Optional[int] = None
         if os.path.exists(path):
             with open(path, encoding="utf-8") as fh:
                 data = json.load(fh)
@@ -66,6 +71,7 @@ class Store:
             self.applied = {int(k): v for k, v in data.get("applied", {}).items()}
             self.status = {int(k): v for k, v in data.get("status", {}).items()}
             self.max_slots = data.get("max_slots")
+            self.pin_length = data.get("pin_length")
 
     def save(self) -> None:
         tmp = f"{self.path}.tmp"
@@ -76,6 +82,7 @@ class Store:
                     "applied": self.applied,
                     "status": self.status,
                     "max_slots": self.max_slots,
+                    "pin_length": self.pin_length,
                 },
                 fh,
                 indent=1,
@@ -96,6 +103,25 @@ class Store:
 
     def set_status(self, slot: int, state: str, message: str = "") -> None:
         self.status[slot] = {"state": state, "message": message, "at": int(time.time())}
+
+    def set_pin_length(self, length: Optional[int]) -> bool:
+        """Record the lock's PIN length; return True if it changed from a known value."""
+        if length is None or length == self.pin_length:
+            return False
+        changed = self.pin_length is not None
+        self.pin_length = length
+        if changed:
+            for slot in self.applied:
+                self.applied[slot] = UNKNOWN
+            for slot in self.pending_slots():
+                self.set_status(slot, PENDING, f"Re-writing after PIN length changed to {length}")
+        self.save()
+        return changed
+
+    def length_problem(self, pin: str) -> Optional[str]:
+        if self.pin_length and len(pin) != self.pin_length:
+            return f"PIN must be {self.pin_length} digits (the lock's PIN length)"
+        return None
 
     def replace_rows(self, submitted: list) -> list:
         """Validate and adopt a full table from the UI; return the slots that now need a write."""
@@ -132,9 +158,12 @@ class Store:
             if pin in seen:
                 errors[str(slot)] = f"Same PIN as slot {seen[pin]}"
             seen.setdefault(pin, slot)
-        # Schlage locks hold one PIN length for every code (set on the lock).
+        # Schlage locks hold one PIN length for every code (configuration parameter 16).
+        for slot, pin in active.items():
+            if problem := self.length_problem(pin):
+                errors.setdefault(str(slot), problem)
         lengths = {len(p) for p in active.values()}
-        if len(lengths) > 1:
+        if len(lengths) > 1 and not self.pin_length:
             common = max(lengths, key=lambda n: sum(len(p) == n for p in active.values()))
             for slot, pin in active.items():
                 if len(pin) != common:
@@ -170,4 +199,4 @@ class Store:
                     "status": self.status.get(slot, {"state": SYNCED if slot in self.applied else PENDING}),
                 }
             )
-        return {"rows": out, "max_slots": self.max_slots}
+        return {"rows": out, "max_slots": self.max_slots, "pin_length": self.pin_length}

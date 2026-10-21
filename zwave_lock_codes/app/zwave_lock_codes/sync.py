@@ -70,7 +70,7 @@ class Syncer:
         async with self._io, self._client_factory() as ha:
             device_id = await ha.device_id(self.lock_entity)
             await ha.subscribe("zwave_js_notification", lambda e: self._on_notification(e, device_id))
-            await self._learn_slot_count(ha)
+            await self._learn_lock(ha, device_id)
             # One attempt per slot per pass; a failure waits for the next save.
             tried: set = set()
             while todo := [s for s in self.store.pending_slots() if s not in tried]:
@@ -82,19 +82,64 @@ class Syncer:
         if zwave.is_duplicate_refusal(event.get("data", {}), device_id):
             self._refused = True
 
-    async def _learn_slot_count(self, ha: HAClient) -> None:
-        if self.store.max_slots:
-            return
-        codes = await ha.call_service(
-            "zwave_js", "get_lock_usercode", {}, self.lock_entity, response=True
+    async def _learn_lock(self, ha: HAClient, device_id: Optional[str]) -> None:
+        """Fill in slot count and PIN length the first time; both are cache reads."""
+        if not self.store.max_slots:
+            codes = await ha.call_service(
+                "zwave_js", "get_lock_usercode", {}, self.lock_entity, response=True
+            )
+            if codes:
+                self.store.max_slots = max(int(k) for k in codes)
+        if not self.store.pin_length and device_id:
+            await self._read_config(ha, device_id)
+
+    async def read_config(self) -> list:
+        """Return the lock's configuration parameters from Z-Wave JS's cache."""
+        async with self._io, self._client_factory() as ha:
+            return await self._read_config(ha, await ha.device_id(self.lock_entity))
+
+    async def set_config(
+        self, property_: int, property_key: Optional[int], endpoint: int, value: int
+    ) -> list:
+        """Write one configuration parameter and return the parameters as they now read."""
+        async with self._io, self._client_factory() as ha:
+            device_id = await ha.device_id(self.lock_entity)
+            # Read first so a PIN length changed at the lock is noticed before we change it again.
+            await self._read_config(ha, device_id)
+            payload = {
+                "type": "zwave_js/set_config_parameter",
+                "device_id": device_id,
+                "property": property_,
+                "endpoint": endpoint,
+                "value": value,
+            }
+            if property_key is not None:
+                payload["property_key"] = property_key
+            result = await ha.command(payload)
+            if (result or {}).get("status") in zwave.FAILED_SET_STATUSES:
+                raise HAError("The lock did not accept the setting")
+            _LOGGER.info("Set configuration parameter %s to %s", property_, value)
+            return await self._read_config(ha, device_id)
+
+    async def _read_config(self, ha: HAClient, device_id: Optional[str]) -> list:
+        if not device_id:
+            raise HAError(f"{self.lock_entity} has no Z-Wave device")
+        params = zwave.config_params(
+            await ha.command({"type": "zwave_js/get_config_parameters", "device_id": device_id})
         )
-        if codes:
-            self.store.max_slots = max(int(k) for k in codes)
+        if self.store.set_pin_length(zwave.pin_length_from(params)):
+            # The lock may have erased its codes; write ours back once this job ends.
+            _LOGGER.info("PIN length is now %s; re-writing codes", self.store.pin_length)
+            self.request()
+        return params
 
     async def _write_slot(self, ha: HAClient, slot: int) -> bool:
         """Write one slot and record the outcome; False if it was edited meanwhile."""
         store = self.store
         want = wanted_pin(store.rows.get(slot))
+        if want and (problem := store.length_problem(want)):
+            self._fail(slot, problem)
+            return True
         store.set_status(slot, WRITING)
         store.save()
         self._refused = False

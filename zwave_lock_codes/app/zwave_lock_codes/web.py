@@ -53,10 +53,35 @@ def build_app(store: Store, syncer: Syncer) -> web.Application:
         _LOGGER.info("Imported %s codes from %s", added, syncer.lock_entity)
         return state()
 
+    async def get_config(request: web.Request) -> web.Response:
+        try:
+            params = await syncer.read_config()
+        except HAError as err:
+            return web.json_response({"message": str(err)}, status=502)
+        return web.json_response({"params": params, "pin_length": store.pin_length})
+
+    async def put_config(request: web.Request) -> web.Response:
+        body = await request.json()
+        try:
+            property_ = int(body["property"])
+            value = int(body["value"])
+            endpoint = int(body.get("endpoint") or 0)
+            key = body.get("property_key")
+            key = None if key is None else int(key)
+        except (KeyError, TypeError, ValueError):
+            return web.json_response({"message": "property and value must be numbers"}, status=400)
+        try:
+            params = await syncer.set_config(property_, key, endpoint, value)
+        except HAError as err:
+            return web.json_response({"message": str(err)}, status=502)
+        return web.json_response({"params": params, "pin_length": store.pin_length})
+
     app = web.Application(client_max_size=256 * 1024)
     app.router.add_get("/", index)
     app.router.add_get("/api/state", get_state)
     app.router.add_put("/api/codes", put_codes)
     app.router.add_post("/api/retry", post_retry)
     app.router.add_post("/api/import", post_import)
+    app.router.add_get("/api/config", get_config)
+    app.router.add_put("/api/config", put_config)
     return app

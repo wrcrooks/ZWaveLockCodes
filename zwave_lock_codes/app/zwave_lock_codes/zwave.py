@@ -14,6 +14,7 @@ that Home Assistant's ``zwave_js.*_lock_usercode`` actions use:
   15, which arrives while the write is still in flight.
 """
 
+import re
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -22,6 +23,10 @@ from typing import Any, Optional
 NOTIFICATION_CC = 113
 ACCESS_CONTROL = 6
 DUPLICATE_CODE_EVENT = 15
+
+# SetValueStatus codes from Z-Wave JS that mean the write did not happen.
+FAILED_SET_STATUSES = {0, 2, 3, 4, 5}
+_PIN_LENGTH_LABEL = re.compile(r"(pin|code).*length", re.IGNORECASE)
 
 EMPTY = "empty"
 KNOWN = "known"
@@ -62,3 +67,39 @@ def is_duplicate_refusal(event_data: dict, device_id: Optional[str]) -> bool:
         and event_data.get("event") == DUPLICATE_CODE_EVENT
         and (device_id is None or event_data.get("device_id") == device_id)
     )
+
+
+def config_params(raw: dict) -> list:
+    """Flatten ``zwave_js/get_config_parameters`` into a list ordered by parameter."""
+    params = []
+    for value_id, entry in (raw or {}).items():
+        meta = entry.get("metadata") or {}
+        states = meta.get("states") or {}
+        params.append(
+            {
+                "id": value_id,
+                "property": entry.get("property"),
+                "property_key": entry.get("property_key"),
+                "endpoint": entry.get("endpoint") or 0,
+                "label": meta.get("label") or f"Parameter {entry.get('property')}",
+                "description": meta.get("description") or "",
+                "value": entry.get("value"),
+                "default": meta.get("default"),
+                "min": meta.get("min"),
+                "max": meta.get("max"),
+                "unit": meta.get("unit") or "",
+                "writeable": meta.get("writeable", True) is not False,
+                "states": [[int(k), v] for k, v in sorted(states.items(), key=lambda kv: int(kv[0]))],
+                "pin_length": bool(_PIN_LENGTH_LABEL.search(meta.get("label") or "")),
+            }
+        )
+    params.sort(key=lambda p: (p["property"] or 0, p["property_key"] or 0))
+    return params
+
+
+def pin_length_from(params: list) -> Optional[int]:
+    """Return the lock's configured PIN length, if it has such a parameter."""
+    for param in params:
+        if param["pin_length"] and isinstance(param["value"], int):
+            return param["value"]
+    return None

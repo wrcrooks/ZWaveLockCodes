@@ -23,6 +23,9 @@ class FakeLock:
         self.writes = []
         self.sessions = 0
         self.fail_slots = set()
+        # Configuration parameters as Z-Wave JS reports them for a BE469ZP.
+        self.config = {4: 0, 15: 0, 16: 4}
+        self.reject_config = False
 
 
 class FakeHA:
@@ -49,6 +52,31 @@ class FakeHA:
         code = self.lock.codes[slot]
         shown = "*" * len(code) if (code and self.lock.masked) else code
         return {"usercode": shown, "in_use": bool(code)}
+
+    async def command(self, payload):
+        lock = self.lock
+        if payload["type"] == "zwave_js/get_config_parameters":
+            labels = {4: "Vacation Mode", 15: "Auto Lock", 16: "User Code PIN Length"}
+            return {
+                f"7-112-0-{n}": {
+                    "property": n,
+                    "property_key": None,
+                    "endpoint": 0,
+                    "value": value,
+                    "metadata": {"label": labels[n], "writeable": True, "min": 0, "max": 255,
+                                 **({} if n == 16 else {"states": {"0": "Disable", "255": "Enable"}})},
+                }
+                for n, value in lock.config.items()
+            }
+        if payload["type"] == "zwave_js/set_config_parameter":
+            if lock.reject_config:
+                return {"status": 5}
+            n, value = payload["property"], payload["value"]
+            if n == 16 and value != lock.config[16]:
+                lock.codes = {s: "" for s in lock.codes}  # worst case: the lock wipes its codes
+            lock.config[n] = value
+            return {"status": 255}
+        raise AssertionError(payload)
 
     async def call_service(self, domain, service, data, entity_id, response=False):
         assert entity_id == LOCK
@@ -242,3 +270,79 @@ def test_validation(tmp_path, rows, slot, text):
 )
 def test_read_slot(usercode, in_use, kind):
     assert zwave.read_slot(usercode, in_use).kind == kind
+
+
+def test_pin_length_comes_from_the_lock(tmp_path):
+    async def go():
+        lock, store, syncer = make(tmp_path)
+        lock.config[16] = 6
+        await save(store, syncer, [row(1, "111111")])
+        assert store.pin_length == 6 and lock.codes[1] == "111111"
+        with pytest.raises(ValidationError) as err:
+            store.replace_rows([row(1, "111111"), row(2, "2222")])
+        assert "6 digits" in err.value.errors["2"]
+
+    asyncio.run(go())
+
+
+def test_pin_length_change_rewrites_codes(tmp_path):
+    async def go():
+        lock, store, syncer = make(tmp_path)
+        await save(store, syncer, [row(1, "1111"), row(2, "2222"), row(3, "3333", enabled=False)])
+        await syncer.read_config()
+        assert store.pin_length == 4
+        lock.writes.clear()
+
+        params = await syncer.set_config(16, None, 0, 5)
+        assert next(p for p in params if p["pin_length"])["value"] == 5
+        await syncer.wait()
+        # The lock wiped its codes; 4-digit codes can't go back until edited.
+        assert lock.writes == []
+        assert "5 digits" in store.status[1]["message"] and store.status[1]["state"] == ERROR
+
+        await save(store, syncer, [row(1, "11111"), row(2, "22222"), row(3, "3333", enabled=False)])
+        assert lock.codes[1] == "11111" and lock.codes[2] == "22222"
+        assert store.status[1]["state"] == SYNCED
+
+    asyncio.run(go())
+
+
+def test_pin_length_change_restores_matching_codes(tmp_path):
+    async def go():
+        lock, store, syncer = make(tmp_path)
+        lock.config[16] = 5
+        await save(store, syncer, [row(1, "11111")])
+        lock.config[16] = 4  # changed at the lock, back to 4 digits
+        await syncer.set_config(16, None, 0, 5)  # and back to 5 here: the lock wipes
+        await syncer.wait()
+        assert lock.codes[1] == "11111" and store.status[1]["state"] == SYNCED
+
+    asyncio.run(go())
+
+
+def test_config_write_rejected(tmp_path):
+    async def go():
+        lock, store, syncer = make(tmp_path)
+        lock.reject_config = True
+        with pytest.raises(HAError):
+            await syncer.set_config(4, None, 0, 255)
+        assert lock.config[4] == 0
+
+    asyncio.run(go())
+
+
+def test_config_params_shape():
+    params = zwave.config_params(
+        {
+            "7-112-0-16": {"property": 16, "property_key": None, "endpoint": 0, "value": 4,
+                           "metadata": {"label": "User Code PIN Length", "min": 4, "max": 8, "writeable": True}},
+            "7-112-0-4": {"property": 4, "property_key": None, "endpoint": 0, "value": 255,
+                          "metadata": {"label": "Vacation Mode", "states": {"255": "Enable", "0": "Disable"}}},
+            "7-112-0-12": {"property": 12, "property_key": None, "endpoint": 0, "value": 87,
+                           "metadata": {"label": "Electronic Transition Count", "writeable": False}},
+        }
+    )
+    assert [p["property"] for p in params] == [4, 12, 16]
+    assert params[0]["states"] == [[0, "Disable"], [255, "Enable"]]
+    assert params[1]["writeable"] is False
+    assert zwave.pin_length_from(params) == 4

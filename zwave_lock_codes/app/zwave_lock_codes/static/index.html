@@ -49,6 +49,25 @@
   .banner:empty { display: none; }
   .empty { padding: 24px; text-align: center; color: var(--muted); }
   label.toggle { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); }
+  details.config { margin-bottom: 12px; }
+  details.config > summary { padding: 10px 14px; cursor: pointer; font-weight: 600; list-style-position: inside; }
+  details.config[open] > summary { border-bottom: 1px solid var(--line); }
+  .config-body { padding: 4px 14px 12px; }
+  .setting { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; padding: 8px 0;
+             border-bottom: 1px solid var(--line); }
+  .setting:last-child { border-bottom: 0; }
+  .setting .what { flex: 1 1 260px; }
+  .setting .desc { color: var(--muted); font-size: 12px; }
+  .setting .how { display: flex; gap: 8px; align-items: center; }
+  .setting select, .setting input { font: inherit; padding: 4px 6px; border: 1px solid var(--line);
+                                    border-radius: 4px; background: var(--input); color: var(--text); }
+  .setting input { width: 90px; }
+  .setting .note { font-size: 12px; min-width: 60px; }
+  .ok { color: var(--ok); }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); margin: 14px 0 2px; }
+  .info { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 4px 16px; }
+  .info div { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; }
+  .info span:last-child { font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
@@ -65,6 +84,10 @@
     <button id="save" class="primary" disabled>Save &amp; sync</button>
   </header>
   <p class="banner" id="banner"></p>
+  <details class="card config" id="config">
+    <summary>Lock configuration</summary>
+    <div class="config-body" id="config-body"><p class="msg">Loading…</p></div>
+  </details>
   <div class="card">
     <table>
       <thead><tr><th>Slot</th><th>Name</th><th>PIN</th><th>Enabled</th><th>Notes</th><th>Status</th><th></th></tr></thead>
@@ -131,7 +154,7 @@ function render() {
     const name = bind(el("input", { type: "text", value: r.name || "", maxLength: 64, placeholder: "Name" }), "name");
     const pin = bind(el("input", { type: reveal ? "text" : "password", className: "pin", value: r.pin ?? "",
                                    inputMode: "numeric", maxLength: 8, autocomplete: "off",
-                                   placeholder: r.pin === null ? "hidden on lock" : "4–8 digits" }), "pin");
+                                   placeholder: r.pin === null ? "hidden on lock" : server.pin_length ? `${server.pin_length} digits` : "4–8 digits" }), "pin");
     const enabled = bind(el("input", { type: "checkbox", checked: r.enabled !== false }), "enabled");
     const notes = bind(el("input", { type: "text", value: r.notes || "", maxLength: 256 }), "notes");
     const st = r.status;
@@ -203,6 +226,67 @@ $("import").addEventListener("click", busy($("import"), async () => {
   adopt(await api("POST", "api/import"));
 }));
 $("reveal").addEventListener("change", render);
+
+// Lock configuration: read from the lock only when the section is opened.
+function renderConfig(params) {
+  const settings = params.filter((p) => p.writeable);
+  const info = params.filter((p) => !p.writeable);
+  const body = $("config-body");
+  body.replaceChildren();
+  if (!params.length) body.append(el("p", { className: "msg", textContent: "This lock reports no configuration parameters." }));
+  for (const p of settings) {
+    let control;
+    // A small numeric range (like PIN length 4–8) reads better as a list of its values.
+    const choices = p.states.length ? p.states
+      : p.min != null && p.max != null && p.max - p.min <= 12
+        ? Array.from({ length: p.max - p.min + 1 }, (_, i) => [p.min + i, String(p.min + i)]) : [];
+    if (choices.length) {
+      control = el("select", {}, ...choices.map(([v, label]) => el("option", { value: v, textContent: label, selected: v === p.value })));
+      if (!choices.some(([v]) => v === p.value)) control.prepend(el("option", { value: "", textContent: "Unknown", selected: true, disabled: true }));
+    } else {
+      control = el("input", { type: "number", value: p.value ?? "", min: p.min ?? "", max: p.max ?? "", step: 1 });
+    }
+    const note = el("span", { className: "note" });
+    control.addEventListener("change", async () => {
+      const value = Number(control.value);
+      if (p.pin_length && !confirm(
+        `Change the PIN length to ${value} digits?\n\nEvery code must then be ${value} digits long, and the lock ` +
+        `may erase its existing codes. Codes in the table that are ${value} digits will be written to the lock again; ` +
+        `edit the others to ${value} digits and save.`)) { control.value = p.value; return; }
+      control.disabled = true;
+      note.className = "note msg"; note.textContent = "Saving…";
+      try {
+        const data = await api("PUT", "api/config", { property: p.property, property_key: p.property_key, endpoint: p.endpoint, value });
+        renderConfig(data.params);
+        refresh();
+      } catch (e) {
+        control.value = p.value ?? "";
+        control.disabled = false;
+        note.className = "note err"; note.textContent = e.message;
+      }
+    });
+    body.append(el("div", { className: "setting" },
+      el("div", { className: "what" }, el("div", { textContent: p.label }),
+         p.description ? el("div", { className: "desc", textContent: p.description }) : ""),
+      el("div", { className: "how" }, control, p.unit ? el("span", { className: "msg", textContent: p.unit }) : "", note)));
+  }
+  if (info.length) {
+    body.append(el("h2", { textContent: "Lock information" }),
+      el("div", { className: "info" }, ...info.map((p) => el("div", {},
+        el("span", { className: "msg", textContent: p.label }),
+        el("span", { textContent: p.states.find(([v]) => v === p.value)?.[1] ?? p.value ?? "—" })))));
+  }
+}
+
+$("config").addEventListener("toggle", async () => {
+  if (!$("config").open) return;
+  $("config-body").replaceChildren(el("p", { className: "msg", textContent: "Reading settings…" }));
+  try {
+    renderConfig((await api("GET", "api/config")).params);
+  } catch (e) {
+    $("config-body").replaceChildren(el("p", { className: "err", textContent: `Could not read settings: ${e.message}` }));
+  }
+});
 
 refresh().catch((e) => { $("banner").textContent = e.message; });
 </script>
